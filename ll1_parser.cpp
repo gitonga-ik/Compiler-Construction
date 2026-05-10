@@ -1,37 +1,43 @@
 /*
- *  LL(1) Table-Driven Parser for the mini-language.
+ *  LL(1) Table-Driven Parser — full compiler pipeline.
  *
- *   1.  program       → BEGIN stmt_list END
- *   2.  stmt_list     → stmt stmt_list'
- *   3.  stmt_list'    → stmt stmt_list'
- *   4.  stmt_list'    → ε
- *   5.  stmt          → assignment
- *   6.  stmt          → print_stmt
- *   7.  stmt          → if_stmt
- *   8.  stmt          → while_stmt
- *   9.  assignment    → type id = expr ;
- *  10.  assignment    → id = expr ;
- *  11.  print_stmt    → cout << expr ;
- *  12.  if_stmt       → if ( expr ) { stmt_list } else_part
- *  13.  else_part     → else { stmt_list }
- *  14.  else_part     → ε
- *  15.  while_stmt    → while ( expr ) { stmt_list }
- *  16.  expr          → arith_expr expr'
- *  17.  expr'         → == arith_expr
- *  18.  expr'         → < arith_expr
- *  19.  expr'         → > arith_expr
- *  20.  expr'         → ε
- *  21.  arith_expr    → term arith_expr'
- *  22.  arith_expr'   → + term arith_expr'
- *  23.  arith_expr'   → - term arith_expr'
- *  24.  arith_expr'   → ε
- *  25.  term          → id
- *  26.  term          → integer
- *  27.  term          → string_literal
- *  28.  term          → ( expr )
- *  29.  type          → int
- *  30.  type          → string
+ *  Stages performed by this binary:
+ *    1. Read token stream from tokens.out   (produced by the scanner)
+ *    2. LL(1) parse → Concrete Parse Tree
+ *    3. AST construction
+ *    4. Intermediate Code Generation (Three-Address Code)
  *
+ *  Grammar (30 productions):
+ *   1.  program       -> BEGIN stmt_list END
+ *   2.  stmt_list     -> stmt stmt_list'
+ *   3.  stmt_list'    -> stmt stmt_list'
+ *   4.  stmt_list'    -> epsilon
+ *   5.  stmt          -> assignment
+ *   6.  stmt          -> print_stmt
+ *   7.  stmt          -> if_stmt
+ *   8.  stmt          -> while_stmt
+ *   9.  assignment    -> type id = expr ;
+ *  10.  assignment    -> id = expr ;
+ *  11.  print_stmt    -> cout << expr ;
+ *  12.  if_stmt       -> if ( expr ) { stmt_list } else_part
+ *  13.  else_part     -> else { stmt_list }
+ *  14.  else_part     -> epsilon
+ *  15.  while_stmt    -> while ( expr ) { stmt_list }
+ *  16.  expr          -> arith_expr expr'
+ *  17.  expr'         -> == arith_expr
+ *  18.  expr'         -> < arith_expr
+ *  19.  expr'         -> > arith_expr
+ *  20.  expr'         -> epsilon
+ *  21.  arith_expr    -> term arith_expr'
+ *  22.  arith_expr'   -> + term arith_expr'
+ *  23.  arith_expr'   -> - term arith_expr'
+ *  24.  arith_expr'   -> epsilon
+ *  25.  term          -> id
+ *  26.  term          -> integer
+ *  27.  term          -> string_literal
+ *  28.  term          -> ( expr )
+ *  29.  type          -> int
+ *  30.  type          -> string
  */
 
 #include <iostream>
@@ -46,17 +52,15 @@
 #include "terminals.h"
 #include "production_rules.h"
 #include "parse_table.h"
+#include "tree_node.h"
+#include "ast_builder.h"
+#include "icg.h"
 
-struct TreeNode {
-    std::string label;
-    std::vector<std::shared_ptr<TreeNode>> children;
-    explicit TreeNode(std::string lbl) : label(std::move(lbl)) {}
-    void addChild(std::shared_ptr<TreeNode> c) { children.push_back(std::move(c)); }
-};
+// ── parse-tree printer ────────────────────────────────────────────────────────
 
 void printTree(const std::shared_ptr<TreeNode> &node,
-               const std::string &prefix = "",
-               bool isLast = true)
+               const std::string &prefix,
+               bool isLast)
 {
     if (prefix.empty()) {
         std::cout << node->label << "\n";
@@ -68,6 +72,8 @@ void printTree(const std::shared_ptr<TreeNode> &node,
         printTree(node->children[i], childPfx, i == node->children.size() - 1);
 }
 
+// ── token loader ──────────────────────────────────────────────────────────────
+
 std::vector<Terminals> loadTokens(const std::string &path)
 {
     std::ifstream in(path);
@@ -78,8 +84,7 @@ std::vector<Terminals> loadTokens(const std::string &path)
     std::string line;
     while (std::getline(in, line))
     {
-        if (line.empty())
-            continue;
+        if (line.empty()) continue;
 
         auto paren = line.find('(');
         std::string typeName = (paren != std::string::npos)
@@ -91,12 +96,10 @@ std::vector<Terminals> loadTokens(const std::string &path)
             typeName.pop_back();
 
         Terminal tt = nameToTerminal(typeName);
-        if (static_cast<int>(tt) == -1)
-            continue;
+        if (static_cast<int>(tt) == -1) continue;
 
         std::string lexeme;
-        if (paren != std::string::npos)
-        {
+        if (paren != std::string::npos) {
             auto close = line.rfind(')');
             if (close != std::string::npos && close > paren)
                 lexeme = line.substr(paren + 1, close - paren - 1);
@@ -106,6 +109,8 @@ std::vector<Terminals> loadTokens(const std::string &path)
     tokens.push_back({T_EOF, "$"});
     return tokens;
 }
+
+// ── LL(1) parser ──────────────────────────────────────────────────────────────
 
 class LL1Parser
 {
@@ -133,13 +138,14 @@ public:
             StackEntry stack_top = stack.top();
             const Terminals &current_token = tokens_[pos_];
 
-            // Accept
-            if (stack_top.symbol.isTerminal && stack_top.symbol.terminal == T_EOF && current_token.type == T_EOF) {
-                std::cout << "\n[Parser] SUCCESS — program is syntactically valid.\n\n";
+            if (stack_top.symbol.isTerminal &&
+                stack_top.symbol.terminal == T_EOF &&
+                current_token.type == T_EOF)
+            {
+                std::cout << "\n[Parser] SUCCESS -- program is syntactically valid.\n\n";
                 return root;
             }
 
-            // Terminal match
             if (stack_top.symbol.isTerminal) {
                 if (stack_top.symbol.terminal == current_token.type) {
                     std::string lbl = termName(current_token.type);
@@ -158,7 +164,6 @@ public:
                 continue;
             }
 
-            // Non-terminal: look up production
             NonTerminal non_terminal = stack_top.symbol.non_terminal;
             Terminal look_ahead_token = current_token.type;
 
@@ -184,7 +189,9 @@ public:
             } else {
                 std::vector<std::shared_ptr<TreeNode>> childNodes;
                 for (const Symbol &symbol : prod.right_hand_side) {
-                    std::string lbl = symbol.isTerminal ? termName(symbol.terminal) : ntName(symbol.non_terminal);
+                    std::string lbl = symbol.isTerminal
+                                        ? termName(symbol.terminal)
+                                        : ntName(symbol.non_terminal);
                     childNodes.push_back(std::make_shared<TreeNode>(lbl));
                     parentNode->addChild(childNodes.back());
                 }
@@ -201,40 +208,77 @@ private:
     size_t pos_;
 };
 
+// ── main ──────────────────────────────────────────────────────────────────────
+
 int main(int argc, char *argv[])
 {
     std::string tokenFile = (argc > 1) ? argv[1] : "tokens.out";
 
     std::vector<Terminals> tokens;
-    try
-    {
+    try {
         tokens = loadTokens(tokenFile);
-    }
-    catch (const std::exception &e)
-    {
+    } catch (const std::exception &e) {
         std::cerr << e.what() << "\n";
         return 1;
     }
 
     std::cout << "[Parser] Loaded " << tokens.size() - 1
               << " token(s) from '" << tokenFile << "'\n\n";
-    std::cout << "=== Parse Trace ===\n";
+
+    std::cout << "========================================\n";
+    std::cout << "         LL(1) Parse Trace\n";
+    std::cout << "========================================\n";
 
     auto prods = makeProductions();
     auto table = buildParseTable();
+    std::shared_ptr<TreeNode> parseTree;
 
-    try
-    {
+    try {
         LL1Parser parser(std::move(tokens), std::move(prods), std::move(table));
-        auto tree = parser.parse();
-
-        std::cout << "=== Parse Tree ===\n";
-        printTree(tree);
+        parseTree = parser.parse();
+    } catch (const std::exception &e) {
+        std::cerr << "\n" << e.what() << "\n";
+        return 1;
     }
-    catch (const std::exception &e)
-    {
-        std::cerr << "\n"
-                  << e.what() << "\n";
+
+    std::cout << "========================================\n";
+    std::cout << "      Concrete Parse Tree\n";
+    std::cout << "========================================\n";
+    printTree(parseTree);
+    std::cout << "\n";
+
+    std::cout << "========================================\n";
+    std::cout << "      Abstract Syntax Tree (AST)\n";
+    std::cout << "========================================\n";
+
+    ASTNodePtr ast;
+    try {
+        ASTBuilder builder;
+        ast = builder.build(parseTree);
+    } catch (const std::exception &e) {
+        std::cerr << "AST build error: " << e.what() << "\n";
+        return 1;
+    }
+
+    printAST(ast);
+    std::cout << "\n";
+
+    std::cout << "========================================\n";
+    std::cout << "      Three-Address Code (TAC)\n";
+    std::cout << "========================================\n";
+
+    try {
+        ICG icg;
+        auto tac = icg.generate(ast);
+        printTAC(tac);
+
+        std::ofstream tacFile("tac.out");
+        if (tacFile.is_open()) {
+            printTAC(tac, tacFile);
+            std::cerr << "\n[ICG] Three-address code written to 'tac.out'\n";
+        }
+    } catch (const std::exception &e) {
+        std::cerr << "ICG error: " << e.what() << "\n";
         return 1;
     }
 

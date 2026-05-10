@@ -1,0 +1,24 @@
+   1    name = "Ian"
+   2    salary = 10000
+   3    bonus = 500
+   4    hours_worked = 4
+
+L0:
+   5    t0 = hours_worked > 0
+   6    IFFALSE t0 GOTO L1
+   7    t1 = salary + bonus
+   8    salary = t1
+   9    t2 = hours_worked - 1
+  10    hours_worked = t2
+  11    GOTO L0
+
+L1:
+  12    PRINT name
+  13    PRINT salary
+  14    IFFALSE 85856 GOTO L2
+  15    PRINT new
+  16    GOTO L3
+
+L2:
+
+L3:
