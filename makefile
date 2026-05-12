@@ -31,4 +31,4 @@ icg:
 ir: clean scanner icg
 	./scanner input.txt ; ./icg tokens.out
 	
-all: clean scanner recursive ll1
+all: clean scanner icg ir
