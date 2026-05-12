@@ -88,8 +88,9 @@ const char *ntName(NonTerminal non_terminal);
 Terminal nameToTerminal(const std::string &name);
 
 struct Terminals {
-    Terminal   type;
+    Terminal type;
     std::string lexeme;
+    int line = 0;      
 };
 
 #endif

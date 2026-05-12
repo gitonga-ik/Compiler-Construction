@@ -82,8 +82,10 @@ std::vector<Terminals> loadTokens(const std::string &path)
 
     std::vector<Terminals> tokens;
     std::string line;
+    int lineNum = 0;                                          // ← track source line
     while (std::getline(in, line))
     {
+        ++lineNum;                                            // ← increment each line
         if (line.empty()) continue;
 
         auto paren = line.find('(');
@@ -104,9 +106,9 @@ std::vector<Terminals> loadTokens(const std::string &path)
             if (close != std::string::npos && close > paren)
                 lexeme = line.substr(paren + 1, close - paren - 1);
         }
-        tokens.push_back({tt, lexeme});
+        tokens.push_back({tt, lexeme, lineNum});             // ← store line number
     }
-    tokens.push_back({T_EOF, "$"});
+    tokens.push_back({T_EOF, "$", lineNum + 1});             // ← EOF gets next line
     return tokens;
 }
 
@@ -157,8 +159,10 @@ public:
                 } else {
                     std::string got = termName(current_token.type);
                     if (!current_token.lexeme.empty()) got += "(" + current_token.lexeme + ")";
-                    throw std::runtime_error(
-                        std::string("[Syntax error] expected '") +
+                    throw std::runtime_error(                 // ← line number added
+                        std::string("[Syntax error] line ") +
+                        std::to_string(current_token.line) +
+                        ": expected '" +
                         termName(stack_top.symbol.terminal) + "', got '" + got + "'");
                 }
                 continue;
@@ -169,11 +173,22 @@ public:
 
             auto non_terminal_row = table_.find(non_terminal);
             if (non_terminal_row == table_.end() || non_terminal_row->second.find(look_ahead_token) == non_terminal_row->second.end()) {
-                std::string got = termName(look_ahead_token);
-                if (!current_token.lexeme.empty()) got += "(" + current_token.lexeme + ")";
-                throw std::runtime_error(
-                    std::string("[Syntax error] no rule for ") +
-                    ntName(non_terminal) + " on input '" + got + "'");
+            std::string got = termName(look_ahead_token);
+            if (!current_token.lexeme.empty()) got += "(" + current_token.lexeme + ")";
+
+            std::string friendly;
+            if (look_ahead_token == T_EOF) {
+                friendly = "Unexpected end of file. The program seems incomplete.";
+            } else {
+                std::string display = current_token.lexeme.empty()
+                                            ? termName(look_ahead_token)
+                                            : current_token.lexeme;
+                friendly = "Unexpected token '" + display + "'. "
+                            "Check for a missing operator, keyword, or punctuation nearby.";
+            }
+
+            throw std::runtime_error(
+                "[Syntax error] line " + std::to_string(current_token.line) + ": " + friendly);
             }
 
             int production_rule = non_terminal_row->second.at(look_ahead_token);
